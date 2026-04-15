@@ -539,15 +539,29 @@ class TextVectorization(Layer):
                     inputs, r'[!"#$%&()\*\+,-\./:;<=>?@\[\\\]^_`{|}~\']', ""
                 )
             if callable(self._standardize):
-                if backend.backend() != "tensorflow":
-                    inputs = backend.convert_to_numpy(inputs)
-                    if inputs.ndim == 0:
-                        inputs = inputs.item()
-                        if isinstance(inputs, bytes):
-                            inputs = inputs.decode(self._encoding)
-                inputs = self._standardize(inputs)
-                if backend.backend() != "tensorflow":
-                    inputs = tf_utils.ensure_tensor(inputs, dtype=tf.string)
+                if backend.backend() != "tensorflow" and tf.executing_eagerly():
+                    inputs_np = backend.convert_to_numpy(inputs)
+
+                    def standardize_element(x):
+                        if isinstance(x, bytes):
+                            x = x.decode(self._encoding)
+                        res = self._standardize(x)
+                        if isinstance(res, tf.Tensor):
+                            res = res.numpy()
+                        if isinstance(res, bytes):
+                            res = res.decode(self._encoding)
+                        return res
+
+                    if inputs_np.ndim == 0:
+                        res = standardize_element(inputs_np.item())
+                    else:
+                        vfunc = np.vectorize(
+                            standardize_element, otypes=[object]
+                        )
+                        res = vfunc(inputs_np)
+                    inputs = tf_utils.ensure_tensor(res, dtype=tf.string)
+                else:
+                    inputs = self._standardize(inputs)
 
             if self._split is not None:
                 # If we are splitting, we validate that the 1st axis is of
@@ -572,15 +586,29 @@ class TextVectorization(Layer):
                 elif self._split == "character":
                     inputs = tf.strings.unicode_split(inputs, "UTF-8")
                 elif callable(self._split):
-                    if backend.backend() != "tensorflow":
-                        inputs = backend.convert_to_numpy(inputs)
-                        if inputs.ndim == 0:
-                            inputs = inputs.item()
-                            if isinstance(inputs, bytes):
-                                inputs = inputs.decode(self._encoding)
-                    inputs = self._split(inputs)
-                    if backend.backend() != "tensorflow":
-                        inputs = tf_utils.ensure_tensor(inputs, dtype=tf.string)
+                    if (
+                        backend.backend() != "tensorflow"
+                        and tf.executing_eagerly()
+                    ):
+                        inputs_np = backend.convert_to_numpy(inputs)
+
+                        def split_element(x):
+                            if isinstance(x, bytes):
+                                x = x.decode(self._encoding)
+                            res = self._split(x)
+                            if isinstance(res, tf.Tensor):
+                                res = res.numpy()
+                            # res can be a list of strings/bytes
+                            return res
+
+                        if inputs_np.ndim == 0:
+                            res = split_element(inputs_np.item())
+                        else:
+                            vfunc = np.vectorize(split_element, otypes=[object])
+                            res = vfunc(inputs_np).tolist()
+                        inputs = tf_utils.ensure_tensor(res, dtype=tf.string)
+                    else:
+                        inputs = self._split(inputs)
 
             # Note that 'inputs' here can be either ragged or dense depending
             # on the configuration choices for this Layer. The strings.ngrams
